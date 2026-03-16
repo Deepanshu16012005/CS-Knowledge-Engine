@@ -1,4 +1,4 @@
-# 🧠 AlgoLogic-RAG: DSA & OS Intelligent Assistant
+# 🧠 DSA & OS Intelligent Assistant
 
 A high-performance, terminal-based AI assistant built to provide precise answers to complex Computer Science questions using **Retrieval-Augmented Generation (RAG)**. 
 
