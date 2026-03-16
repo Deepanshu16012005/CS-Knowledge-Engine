@@ -1,0 +1,14 @@
+# Environments
+rag_env/
+env/
+venv/
+
+# API Keys and Secrets
+.env
+
+# Python Cache
+__pycache__/
+*.pyc
+
+Dsa.pdf
+OS.pdf
