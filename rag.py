@@ -8,7 +8,8 @@ from langchain_core.prompts import ChatPromptTemplate
 import os
 from pinecone import Pinecone  # Native client
 from pinecone_text.sparse import BM25Encoder
-from langchain_core.messages import SystemMessage, HumanMessage
+
+from reranker import rerank_pinecone_matches
 load_dotenv()
 
 # 1. Setup the Native Pinecone Client (Required for Hybrid)
@@ -36,7 +37,7 @@ STRICT RULES:
 3. If the answer is not present, respond with: "The answer is not available in the provided context."
 4. Prefer bullet points or step-by-step explanations for clarity.
 5. IN-TEXT CITATIONS: Every time you state a fact, concept, or algorithm step, you MUST cite the source inline using brackets at the end of the sentence (e.g., [Page 28]).
-6. SOURCE SUMMARY: At the very end of your response, add a section titled "Sources Used:" and list the unique documents( Strictly memtion only pdf name not pdf path ) and page numbers you referenced to build your answer.
+6. SOURCE SUMMARY: At the very end of your response, add a section titled "Sources Used:" and list the unique documents Strictly memtion only Document name not path (e.g., Dsa pdf) and page numbers you referenced to build your answer.
 
 Context from notebook:
 {context}
@@ -59,7 +60,11 @@ def get_rag_answer(query_text: str) -> str:
     # Sparse Vector (Keywords)
     sparse_vec = bm25_encoder.encode_queries(query_text)
 
-    alpha = 0.7  # 0.7 means 70% Semantic (Meaning) and 30% Keyword
+    words = query_text.split()
+    if len(words) <= 3:
+        alpha = 0.3  # Short query? Trust keywords more.
+    else:
+        alpha = 0.7  # Long query? Trust meaning more.
     
     # Multiply every number in the dense list by 0.7
     scaled_dense = [v * alpha for v in dense_vec]
@@ -76,15 +81,27 @@ def get_rag_answer(query_text: str) -> str:
         top_k=3,
         include_metadata=True
     )
+    print("Got Both Sparse and Dense Vectors From Database\n")
 
-    context_pieces = []
-    for match in query_results['matches']:
-        page_num = match.metadata.get('page_label', 'Unknown')
-        # We explicitly label the text snippet with its page number FOR Groq to read
-        formatted_chunk = f"--- (Page: {page_num} \n Source pdf : {match.metadata.get('source', 'unknown')}) ---\n{match.metadata.get('text','no text found under this chunk')}"
-        context_pieces.append(formatted_chunk)
+    print("Reranking using COHERE")
 
-    context_text = "\n\n".join(context_pieces)
+    # Ranking top 3 queries
+    try:
+        context_text = rerank_pinecone_matches(
+            query=query_text, 
+            pinecone_matches=query_results['matches'], 
+            top_n=3
+        )
+        print("Ranking successful")
+    except Exception as e:
+        print(f"Ranking Failed ERROR:{e}")
+        context_pieces = []
+        for match in query_results['matches']:
+            page_num = match.metadata.get('page_label', 'Unknown')
+            # We explicitly label the text snippet with its page number FOR Groq to read
+            formatted_chunk = f"--- (Page: {page_num} \n Source pdf : {match.metadata.get('source', 'unknown')}) ---\n{match.metadata.get('text','no text found under this chunk')}"
+            context_pieces.append(formatted_chunk)
+        context_text = "\n\n".join(context_pieces)
     
     print("Generating answer using AI...")
     # Invoke the chain with the retrieved context and the user's question
@@ -95,4 +112,4 @@ def get_rag_answer(query_text: str) -> str:
     
     return response.content
 
-print("✅ RAG Engine Loaded (Groq Generation) & Connected to Pinecone Database!")
+print("✅ RAG Engine Loaded & Connected to Database!\n")

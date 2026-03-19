@@ -13,7 +13,7 @@ formulator_llm = ChatGroq(
 
 # 2. Define the Prompt Template for the reformulator
 reformulator_prompt = ChatPromptTemplate.from_messages([
-    ("system", """You are a query reformulator. Read the chat history and the user's latest question. 
+    ("system", """You are a query formatter. Your ONLY job is to output the final search string. Do NOT include conversational text, do not explain your reasoning, and do not say 'Here is the query' or 'you are ready for the question'. donot talk with me. Read the chat history and the user's latest question. 
 If the latest question relies on past context (e.g., uses pronouns like 'it', 'this', or 'the algorithm'), rewrite it into a complete, standalone question. 
 If it does not rely on history, output the original question exactly. 
 DO NOT answer the question. ONLY output the rewritten standalone question."""),
@@ -50,7 +50,7 @@ while True:
     print(f"Formulated Query: {actual_query}")
     final_answer = get_rag_answer(actual_query)
 
-    print(f"\nAnswer:\n{final_answer}")
+    print(f"\nAnswer By AI:\n{final_answer}")
 
     chat_history.append({
         "user": actual_query, 
