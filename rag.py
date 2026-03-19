@@ -1,15 +1,26 @@
 import os
 from dotenv import load_dotenv
-from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from langchain_pinecone import PineconeVectorStore
 from langchain_groq import ChatGroq
-from langchain_core.prompts import ChatPromptTemplate   
+from langchain_core.prompts import ChatPromptTemplate 
+
+import os
+from pinecone import Pinecone  # Native client
+from pinecone_text.sparse import BM25Encoder
+from langchain_core.messages import SystemMessage, HumanMessage
 load_dotenv()
+
+# 1. Setup the Native Pinecone Client (Required for Hybrid)
+pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
+index = pc.Index("ragproject")
+
+# 2. Load the BM25 Encoder (The same one used in ingestion)
+bm25_encoder = BM25Encoder()
+bm25_encoder.load("./sparse_vectors/bm_25_vocab_params.json")
+
+
 embeddings_model = GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-001")
-vectorstore = PineconeVectorStore(
-    index_name="deepanshu", 
-    embedding=embeddings_model
-)
 
 groq_llm = ChatGroq(
     model="llama-3.1-8b-instant", 
@@ -24,9 +35,12 @@ STRICT RULES:
 2. Do NOT guess or hallucinate information.
 3. If the answer is not present, respond with: "The answer is not available in the provided context."
 4. Prefer bullet points or step-by-step explanations for clarity.
+5. IN-TEXT CITATIONS: Every time you state a fact, concept, or algorithm step, you MUST cite the source inline using brackets at the end of the sentence (e.g., [Page 28]).
+6. SOURCE SUMMARY: At the very end of your response, add a section titled "Sources Used:" and list the unique documents( Strictly memtion only pdf name not pdf path ) and page numbers you referenced to build your answer.
 
 Context from notebook:
-{context}"""
+{context}
+"""
 
 prompt = ChatPromptTemplate.from_messages([
     ("system", system_instruction),
@@ -37,13 +51,42 @@ rag_chain = prompt | groq_llm
 
 def get_rag_answer(query_text: str) -> str:
     """Takes a formulated query, searches Pinecone, and returns the AI answer."""
-    print("Searching database...")
     
-    # Fetch the top 3 most relevant chunks
-    results = vectorstore.similarity_search(query_text, k=3)
-    context_text = "\n\n".join([doc.page_content for doc in results])
     
-    print("Generating answer using Groq...")
+    # --- STEP A: GENERATE BOTH VECTORS ---
+    # Dense Vector (Meaning)
+    dense_vec = embeddings_model.embed_query(query_text)
+    # Sparse Vector (Keywords)
+    sparse_vec = bm25_encoder.encode_queries(query_text)
+
+    alpha = 0.7  # 0.7 means 70% Semantic (Meaning) and 30% Keyword
+    
+    # Multiply every number in the dense list by 0.7
+    scaled_dense = [v * alpha for v in dense_vec]
+    
+    # Multiply every value in the sparse dictionary by (1 - 0.7) = 0.3
+    scaled_sparse = {
+        'indices': sparse_vec['indices'],
+        'values': [v * (1 - alpha) for v in sparse_vec['values']]
+    }
+
+    query_results = index.query(
+        vector=scaled_dense,
+        sparse_vector=scaled_sparse,
+        top_k=3,
+        include_metadata=True
+    )
+
+    context_pieces = []
+    for match in query_results['matches']:
+        page_num = match.metadata.get('page_label', 'Unknown')
+        # We explicitly label the text snippet with its page number FOR Groq to read
+        formatted_chunk = f"--- (Page: {page_num} \n Source pdf : {match.metadata.get('source', 'unknown')}) ---\n{match.metadata.get('text','no text found under this chunk')}"
+        context_pieces.append(formatted_chunk)
+
+    context_text = "\n\n".join(context_pieces)
+    
+    print("Generating answer using AI...")
     # Invoke the chain with the retrieved context and the user's question
     response = rag_chain.invoke({
         "context": context_text, 

@@ -24,13 +24,13 @@ reformulator_chain = reformulator_prompt | formulator_llm
 
 chat_history=[]
 
-print("Type 'exit' to quit, or 'clear' to wipe chat history for this session.")
+print("Type 'quit' to quit, or 'clear' to wipe chat history for this session.")
 print("-" * 40)
 # 4. Create an interactive loop to ask questions
 while True:
-    query = input("\nWhat would you like to search for?")
+    query = input("\nWhat would you like to search for? \n")
     
-    if query.lower() == 'exit':
+    if query.lower() == 'quit':
         break
     if query.lower() == 'clear':
         chat_history.clear()
