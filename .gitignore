@@ -10,5 +10,4 @@ venv/
 __pycache__/
 *.pyc
 
-Dsa.pdf
-OS.pdf
+./pdf
