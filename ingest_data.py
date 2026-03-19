@@ -8,6 +8,7 @@ from sparse_vectors.vocab_save import train_and_save_bm25
 from pinecone import Pinecone
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 load_dotenv()
+
 # 1. Define the path to your PDF file
 pdf_path = "./pdf/Dsa.pdf"  # Replace with your actual file path
 api_key = os.getenv("PINECONE_API_KEY")
