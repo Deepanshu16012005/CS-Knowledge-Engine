@@ -276,6 +276,46 @@ After Pinecone returns the top 3 hybrid matches, **Cohere `rerank-v3.5`** re-sco
 
 ---
 
+## ⚙️ Work in Progress
+
+These are planned enhancements that are not yet implemented:
+
+### 1. 🗂️ Golden Dataset & Offline Evaluation
+Manually curate 50–200 question-answer pairs based strictly on the DSA and OS notes, where each answer is human-verified. This **golden dataset** will serve as a ground truth benchmark to measure how well the RAG pipeline performs over time.
+
+**Blocked by:** Gemini API rate limits during bulk answer generation. Will be built incrementally.
+
+### 2. 📊 Automated Evaluation with Ragas
+Integrate [Ragas](https://github.com/explodinggradients/ragas) to run offline evaluations against the golden dataset. Key metrics to track:
+
+- **Faithfulness** — Is the generated answer grounded in the retrieved chunks?
+- **Answer Relevancy** — Does the answer actually address the question asked?
+- **Context Precision** — Are the retrieved chunks relevant to the question?
+- **Context Recall** — Are all necessary facts present in the retrieved context?
+
+### 3. ⚙️ CI/CD Pipeline with GitHub Actions
+Set up a GitHub Actions workflow so that every push to the repository automatically runs the Ragas evaluation script. If accuracy drops below a defined threshold, the build fails — preventing regressions from sneaking in through prompt changes or code updates.
+
+```yaml
+# Planned: .github/workflows/eval.yml
+on: [push]
+jobs:
+  evaluate:
+    runs-on: ubuntu-latest
+    steps:
+      - run: python eval/run_ragas.py
+      - run: python eval/check_threshold.py  # Fails build if score drops
+```
+
+### 4. 🌐 Web UI (Streamlit / Gradio)
+Replace the current terminal-based chat loop with a proper web interface so the system is accessible without running Python scripts manually. The UI will include a chat window, query history, and source citations (page number + file) displayed alongside each answer.
+
+**Candidates:**
+- [Streamlit](https://streamlit.io/) — Quick to build, great for demos and portfolios
+- [Gradio](https://gradio.app/) — Easy chat interface with built-in history support
+
+---
+
 ## 📄 License
 
 This project is open-source. Feel free to use and modify.
