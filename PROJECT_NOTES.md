@@ -12,8 +12,13 @@
    - [rag.py](#-ragpy)
    - [reranker.py](#-rerankerpy)
    - [retrieve.py](#-retrievepy)
+   - [testing/evaluate.py](#-testingevaluatepy)
 2. [Complete Data Flow](#2-complete-data-flow)
+   - [Ingestion + Query Flow](#ingestion--query-flow)
+   - [Evaluation Flow](#evaluation-flow)
 3. [Concept Q&A](#3-concept-qa)
+   - [Core RAG Concepts](#core-rag-concepts)
+   - [Evaluation & Ragas Concepts](#evaluation--ragas-concepts)
 
 ---
 
@@ -383,6 +388,8 @@ actual_query = response.content.strip()
 
 # 2. Complete Data Flow
 
+## Ingestion + Query Flow
+
 ```
 ═══════════════════════════════════════════════════════════════
                     PHASE 1: INGESTION (One-Time)
@@ -488,6 +495,8 @@ actual_query = response.content.strip()
 ---
 
 # 3. Concept Q&A
+
+## Core RAG Concepts
 
 ---
 
@@ -667,13 +676,394 @@ The top result from Pinecone hybrid search is good, but not perfect. Without rer
 
 With reranking, the most relevant chunk is always first in the context — the LLM reads the best content first and produces better answers.
 
+
+
 ---
 
-## ❓ Summary of All Models Used
+# 4. Testing & Evaluation — `testing/evaluate.py`
+
+---
+
+## 📄 `testing/evaluate.py`
+
+**Purpose:** Automated offline evaluation of the entire RAG pipeline. Runs 100 questions from a golden dataset, collects answers + context, and scores the pipeline using the Ragas framework with an AI judge.
+
+**File location:** `testing/evaluate.py` — lives in its own subfolder, uses `sys.path.append` to import from the parent project.
+
+---
+
+### Block 1 — Path Fix & Imports
+
+```python
+import sys
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+from reranker import rerank_pinecone_matches
+from ragas import evaluate
+from ragas.metrics.collections import faithfulness, answer_relevancy, context_precision, context_recall
+```
+
+### 🔑 Important Keywords
+
+| Term | Meaning |
+|------|---------|
+| `sys.path.append(...)` | Adds the parent directory to Python's module search path. Without this, `from reranker import ...` would fail because `evaluate.py` is inside a subfolder. |
+| `os.path.dirname(__file__)` | Gets the directory of the current file (`testing/`). |
+| `os.path.join(..., '..')` | Goes one level up — back to the project root. |
+| `ragas` | The evaluation framework. It uses AI judges (LLMs + embeddings) to score your RAG pipeline across 4 metrics. |
+| `faithfulness` | Ragas metric: measures if the answer is grounded in the retrieved context (no hallucination). |
+| `answer_relevancy` | Ragas metric: measures if the answer directly addresses the question asked. |
+| `context_precision` | Ragas metric: measures if the most relevant chunks are ranked first in the retrieved context. |
+| `context_recall` | Ragas metric: measures if all the facts needed to answer the question were found in the retrieved chunks. |
+
+---
+
+### Block 2 — Pipeline Setup (Mirror of `rag.py`)
+
+```python
+pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
+index = pc.Index("ragproject")
+
+bm25_encoder = BM25Encoder()
+bm25_encoder.load("../sparse_vectors/bm_25_vocab_params.json")
+
+embeddings_model = GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-001")
+groq_llm = ChatGroq(model="llama-3.1-8b-instant", temperature=0.2, max_retries=2)
+
+# AI Judges (separate instances — used only by Ragas, not by RAG pipeline)
+judge_llm = ChatGroq(model="llama-3.1-8b-instant", temperature=0.0)
+judge_embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
+```
+
+**Why two separate LLM instances?**
+- `groq_llm` (temp=0.2) is the **generator** — it answers questions with slight flexibility for natural phrasing
+- `judge_llm` (temp=0.0) is the **evaluator** — it judges answer quality with zero randomness. You want a deterministic judge, not a creative one
+
+**Why `models/embedding-001` for judge but `gemini-embedding-001` for RAG?**
+Ragas's `answer_relevancy` metric uses embeddings to measure semantic similarity between the question and the answer. `embedding-001` is used here as it's the standard Gemini embedding model compatible with Ragas. The RAG pipeline continues to use `gemini-embedding-001` for its hybrid search.
+
+---
+
+### Block 3 — Load the Golden Dataset
+
+```python
+df = pd.read_csv("./dataset.csv")
+questions = df["question"].tolist()
+ground_truths = df["ground_truth"].tolist()
+```
+
+### 🔑 Important Keywords
+
+| Term | Meaning |
+|------|---------|
+| `dataset.csv` | Your **golden dataset** — 100 manually written question + verified answer pairs based strictly on your DSA/OS notes. This is the ground truth. |
+| `ground_truth` | The correct, human-verified answer for each question. Ragas compares the AI's answer against this. |
+| `pd.read_csv()` | Reads the CSV into a pandas DataFrame. Each row = one question-answer pair. |
+| `.tolist()` | Converts the DataFrame column into a plain Python list for easy iteration. |
+
+---
+
+### Block 4 — The Test Loop (Core)
+
+```python
+for i, query_text in enumerate(questions):
+    time.sleep(10)  # Rate limit buffer
+
+    # A. HYBRID SEARCH (same logic as rag.py)
+    dense_vec = embeddings_model.embed_query(query_text)
+    sparse_vec = bm25_encoder.encode_queries(query_text)
+    alpha = 0.3 if len(words) <= 3 else 0.7
+    # ... scaling ...
+    query_results = index.query(vector=scaled_dense, sparse_vector=scaled_sparse, top_k=3, include_metadata=True)
+
+    # B. RERANKING
+    context_text, context_pieces = rerank_pinecone_matches(
+        query=query_text,
+        pinecone_matches=query_results['matches'],
+        top_n=3
+    )
+    contexts.append(context_pieces)   # <-- list of strings, not one big string
+
+    # C. GENERATE ANSWER
+    response = rag_chain.invoke({"context": context_text, "question": query_text})
+    answers.append(response.content)
+```
+
+### 🔑 Key Difference from `rag.py`
+
+Notice `rerank_pinecone_matches` now returns **two values**: `context_text, context_pieces`.
+
+- `context_text` → one big formatted string → fed to the LLM for answer generation (same as before)
+- `context_pieces` → **list of individual chunk strings** → fed to Ragas separately
+
+Ragas needs `contexts` as a **list of lists** — each question has a list of its retrieved chunk strings. This is different from the LLM which just needs one combined string. The reranker was updated to return both formats to support this.
+
+| Variable | Type | Used by |
+|----------|------|---------|
+| `context_text` | `str` — one combined string | Groq LLM (answer generation) |
+| `context_pieces` | `list[str]` — individual chunks | Ragas (metric calculation) |
+
+---
+
+### Block 5 — Ragas Evaluation
+
+```python
+data = {
+    "question": questions,       # list of 100 questions
+    "answer": answers,           # list of 100 AI-generated answers
+    "contexts": contexts,        # list of 100 lists (each = 3 chunks)
+    "ground_truth": ground_truths # list of 100 verified correct answers
+}
+dataset = Dataset.from_dict(data)
+
+result = evaluate(
+    dataset=dataset,
+    metrics=[context_precision, context_recall, faithfulness, answer_relevancy],
+    llm=judge_llm,
+    embeddings=judge_embeddings,
+    max_workers=1,
+    raise_exceptions=False
+)
+```
+
+### 🔑 Important Keywords
+
+| Parameter | Meaning |
+|-----------|---------|
+| `Dataset.from_dict(data)` | Converts the Python dict into a HuggingFace `Dataset` object — Ragas requires this format. |
+| `metrics=[...]` | The 4 metrics Ragas will calculate. Each uses a different evaluation strategy. |
+| `llm=judge_llm` | The LLM Ragas uses internally as its AI judge. It reads your answers + context and scores them. |
+| `embeddings=judge_embeddings` | The embedding model Ragas uses for `answer_relevancy` — it measures semantic closeness between question and answer. |
+| `max_workers=1` | Forces Ragas to run evaluations one at a time (no parallelism). This avoids hitting Groq/Gemini rate limits on free tiers. |
+| `raise_exceptions=False` | If one question fails to evaluate (e.g., API timeout), skip it and continue instead of crashing the whole evaluation. |
+
+---
+
+### Block 6 — Results Output
+
+```python
+result_df = result.to_pandas()
+print(f"Faithfulness:        {result_df['faithfulness'].mean():.2f}")
+print(f"Answer Relevancy:    {result_df['answer_relevancy'].mean():.2f}")
+print(f"Context Precision:   {result_df['context_precision'].mean():.2f}")
+print(f"Context Recall:      {result_df['context_recall'].mean():.2f}")
+result_df.to_csv("evaluation_results.csv", index=False)
+```
+
+- `.mean()` across 100 rows gives the **overall pipeline score** for each metric (0.0 to 1.0 scale)
+- `evaluation_results.csv` saves per-question scores — you can inspect which specific questions failed and why
+- `.2f` formats to 2 decimal places: `0.87` not `0.8712345...`
+
+---
+
+## 📊 Evaluation Flow
+
+```
+═══════════════════════════════════════════════════════════════
+              PHASE 3: EVALUATION (testing/evaluate.py)
+═══════════════════════════════════════════════════════════════
+
+  📄 testing/dataset.csv
+  └── 100 rows: question | ground_truth
+       │
+       ▼
+  For each of 100 questions:
+  ┌─────────────────────────────────────────────────────────┐
+  │  time.sleep(10)  ← Rate limit buffer for free APIs      │
+  │                                                         │
+  │  embed_query()       → dense_vec                        │
+  │  encode_queries()    → sparse_vec                       │
+  │  alpha calculation   → dynamic weighting                │
+  │                                                         │
+  │  Pinecone hybrid query (top_k=3)                        │
+  │       │                                                 │
+  │       ▼                                                 │
+  │  rerank_pinecone_matches()                              │
+  │  └── Returns context_text (str) + context_pieces (list) │
+  │                                                         │
+  │  rag_chain.invoke()  → answer (str)                     │
+  │                                                         │
+  │  answers.append(answer)                                 │
+  │  contexts.append(context_pieces)  ← list of 3 chunks   │
+  └─────────────────────────────────────────────────────────┘
+       │
+       ▼  (after all 100 questions)
+  Build Ragas Dataset:
+  {
+    question:     [q1, q2, ... q100]
+    answer:       [a1, a2, ... a100]      ← AI generated
+    contexts:     [[c1a,c1b,c1c], ...]   ← 3 chunks per question
+    ground_truth: [gt1, gt2, ... gt100]  ← your verified answers
+  }
+       │
+       ▼
+  Ragas evaluate()
+  ┌────────────────────────────────────────────────────────┐
+  │  judge_llm (Groq, temp=0.0) reads each Q+A+Context     │
+  │                                                        │
+  │  faithfulness:       Is answer supported by context?   │
+  │  answer_relevancy:   Does answer address the question? │
+  │  context_precision:  Are best chunks ranked first?     │
+  │  context_recall:     Were all needed facts retrieved?  │
+  └────────────────────────────────────────────────────────┘
+       │
+       ▼
+  evaluation_results.csv  ← per-question scores
+  Console output          ← averaged scores (0.0 → 1.0)
+```
+
+---
+
+---
+
+## Evaluation & Ragas Concepts
+
+---
+
+## ❓ What is Ragas and What Does It Do?
+
+**Ragas** (Retrieval Augmented Generation Assessment) is an evaluation framework specifically built to measure how well a RAG pipeline is working. It doesn't just check if the final answer is correct — it measures the quality of *each stage* of your pipeline separately.
+
+Think of it like a report card with 4 subjects instead of one overall grade:
+
+| Metric | Question it answers | What it measures |
+|--------|--------------------|--------------------|
+| **Faithfulness** | "Did the AI make things up?" | Whether every claim in the answer can be traced back to the retrieved context. Score: 0 (hallucinating) → 1 (fully grounded) |
+| **Answer Relevancy** | "Did the AI actually answer the question?" | Semantic similarity between the question and the answer. A vague or off-topic answer scores low. |
+| **Context Precision** | "Did the retriever put the best chunks first?" | Whether the most relevant chunks appear at the top of the retrieved list (position matters for LLMs). |
+| **Context Recall** | "Did the retriever find everything needed?" | Whether the retrieved chunks contain all the facts present in the ground truth answer. |
+
+---
+
+## ❓ How Does Ragas Actually Work Internally?
+
+Ragas uses an **AI-judge approach** — it sends prompts to an LLM and an embedding model to score each metric. Here's what happens for each:
+
+**Faithfulness:**
+1. Ragas extracts all factual claims from the AI's answer (using `judge_llm`)
+2. For each claim, it asks the LLM: "Can this claim be supported by the provided context?"
+3. Score = supported claims ÷ total claims
+
+**Answer Relevancy:**
+1. Ragas generates several "reverse questions" from the answer (using `judge_llm`) — "what question would this answer be responding to?"
+2. Embeds those reverse questions and the original question using `judge_embeddings`
+3. Score = average cosine similarity between reverse questions and original question
+
+**Context Precision:**
+1. For each retrieved chunk, asks the LLM: "Is this chunk relevant to answering the question?"
+2. Calculates a weighted precision score that rewards relevant chunks appearing earlier in the list
+
+**Context Recall:**
+1. Extracts all factual claims from the `ground_truth` answer
+2. For each claim, asks: "Is this claim supported by any retrieved chunk?"
+3. Score = claims found in context ÷ total claims in ground truth
+
+---
+
+## ❓ What is a Golden Dataset and Why Must it be "Golden"?
+
+A **golden dataset** is a manually curated set of question + verified answer pairs that represents the ground truth for your system. It's called "golden" because it's the standard everything else is measured against.
+
+**Why it must be manually written:**
+- Generated by a human who has actually read the notes
+- Each answer is verified to be factually correct based only on what's in the PDF
+- Questions cover a range of types: factual, conceptual, comparison, application
+- It cannot be generated by the same AI being evaluated — that would be circular
+
+**In your project:** `dataset.csv` has 100 questions + answers written from your DSA and OS notes. Every Ragas score is calculated relative to this dataset — if your ground truth is wrong or vague, your scores will be meaningless even if the AI performs perfectly.
+
+---
+
+## ❓ What Does `time.sleep(10)` Do in the Test Loop and Why is it Necessary?
+
+```python
+time.sleep(10)  # Speed bump for free API tiers
+```
+
+This pauses execution for 10 seconds between each question. It's a rate limit buffer.
+
+**Why it's needed:**
+Free API tiers (Groq, Gemini) have **requests-per-minute (RPM)** limits. Running 100 questions back-to-back would exhaust the rate limit in under a minute, causing API errors and failed evaluations. By sleeping 10 seconds between each question, the script runs at 6 questions/minute — well within free-tier limits.
+
+**Trade-off:** 100 questions × 10 seconds = ~17 minutes to complete one full evaluation run. This is why automated CI/CD evaluation is typically run only on push events, not on every local change.
+
+---
+
+## ❓ Why Does `contexts` Need to be a List of Lists?
+
+```python
+contexts.append(context_pieces)   # list of strings, NOT one big string
+```
+
+Ragas requires `contexts` to be `list[list[str]]` — a list where each element is a list of the individual retrieved chunk strings for that question.
+
+```
+contexts = [
+    ["chunk text A", "chunk text B", "chunk text C"],   ← question 1
+    ["chunk text D", "chunk text E", "chunk text F"],   ← question 2
+    ...
+]
+```
+
+This is because Ragas evaluates **each chunk independently** for metrics like `context_precision` and `context_recall`. If you passed one big merged string, Ragas couldn't tell where one chunk ends and another begins — it would treat the entire context as a single document and scoring would be wrong.
+
+---
+
+## ❓ What is `raise_exceptions=False` and When Would You Change it?
+
+```python
+result = evaluate(..., raise_exceptions=False)
+```
+
+With `raise_exceptions=False`, if Ragas fails to evaluate a single question (API timeout, malformed response, rate limit), it marks that row as `NaN` and continues to the next question. The final `.mean()` simply ignores `NaN` rows.
+
+**When to use `True`:** In a CI/CD pipeline where you want the build to fail hard if any evaluation breaks — useful for debugging new issues. In development with free-tier APIs, `False` is safer because transient failures won't abort a 17-minute evaluation run.
+
+---
+
+## ❓ What is the Difference Between Context Precision and Context Recall?
+
+These two metrics measure opposite directions of retrieval quality:
+
+| | Context Precision | Context Recall |
+|--|------------------|----------------|
+| **Question** | "Of what was retrieved, how much was useful?" | "Of what was needed, how much was retrieved?" |
+| **Analogy** | Search results — were the top results relevant? | Search completeness — did you find all the answers? |
+| **Low score means** | Retriever is returning noisy, irrelevant chunks | Retriever is missing important chunks that contain needed facts |
+| **Fixed by** | Better reranking, tighter retrieval (lower top_k) | More chunks (higher top_k), better embeddings, hybrid search |
+
+In your system, a **low context precision** suggests reranking isn't working well. A **low context recall** suggests the hybrid search isn't finding all relevant content — possibly needs better chunking or a higher `top_k`.
+
+---
+
+## ❓ Why is Automated Evaluation Important for a RAG System?
+
+Without evaluation, you're flying blind. Here's what can go wrong silently:
+
+1. **Prompt changes break things** — You tweak `system.txt` to improve one type of answer, and it accidentally makes 20 other questions worse. Without evaluation, you'd never know.
+2. **Embedding model updates** — If Google updates `gemini-embedding-001`, your stored vectors and new query vectors might drift. Scores would drop silently.
+3. **Retrieval regressions** — A change to chunking strategy that seems reasonable might hurt context recall. Numbers catch this; intuition doesn't.
+
+**The eval → fix → eval loop** is what separates a project from a production system:
+```
+Change something
+     ↓
+Run evaluate.py
+     ↓
+Check 4 scores
+     ↓
+If any score dropped → investigate that metric's CSV rows → fix it
+```
+
+---
+
+## ❓ Summary of Models Used
 
 | Model | Provider | Used for | Where |
 |-------|----------|---------|-------|
-| `gemini-embedding-001` | Google Gemini | Dense embeddings (768-dim) | `ingest_data.py`, `rag.py` |
-| `BM25Encoder` | Pinecone Text | Sparse embeddings | `vocab_save.py`, `ingest_data.py`, `rag.py` |
-| `llama-3.1-8b-instant` | Groq | Query reformulation + Answer generation | `retrieve.py`, `rag.py` |
-| `rerank-v3.5` | Cohere | Reranking top-k results | `reranker.py` |
+| `gemini-embedding-001` | Google Gemini | Dense embeddings (768-dim) | `ingest_data.py`, `rag.py`, `evaluate.py` |
+| `embedding-001` | Google Gemini | Ragas judge embeddings (answer relevancy) | `evaluate.py` only |
+| `BM25Encoder` | Pinecone Text | Sparse embeddings | `vocab_save.py`, `ingest_data.py`, `rag.py`, `evaluate.py` |
+| `llama-3.1-8b-instant` (temp=0.2) | Groq | Answer generation | `rag.py`, `evaluate.py` |
+| `llama-3.1-8b-instant` (temp=0.0) | Groq | Query reformulation + Ragas AI judge | `retrieve.py`, `evaluate.py` |
+| `rerank-v3.5` | Cohere | Reranking top-k results | `reranker.py`, `evaluate.py` |

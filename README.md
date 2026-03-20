@@ -13,13 +13,14 @@ This system combines **dense + sparse vector search**, **Cohere reranking**, and
 - 🏆 **Cohere Reranking** — Re-scores retrieved chunks using `rerank-v3.5` for maximum relevance before generation
 - 💬 **Multi-turn Chat** — Maintains last 2 turns of history with automatic query reformulation for follow-up questions
 - 🚫 **No Hallucination** — Strict system prompt ensures answers come only from your uploaded PDF
+- 📊 **RAGAS Evaluation** — Automated pipeline to score the system on Faithfulness, Answer Relevancy, Context Precision and Context Recall against a dataset
 
 ---
 
 ## 📁 Project Structure
 
 ```
-CS-KNOWLEDGEBASE/
+CS-Knowledge-Engine/
 ├── pdf/
 │   └── Dsa.pdf                         # Source PDF notes
 ├── sparse_vectors/
@@ -28,6 +29,10 @@ CS-KNOWLEDGEBASE/
 ├── prompts/
 │   ├── system.txt                      # System prompt for Groq answer generation
 │   └── query_formulator.txt            # System prompt for query reformulation
+├── testing/
+│   ├── evaluate.py                     # Ragas evaluation script
+│   ├── dataset.csv                     # Golden Q&A dataset (ground truth)
+│   └── evaluation_results.csv          # Output scores (auto-generated)
 ├── rag_env/                            # Virtual environment (local only, not committed)
 ├── .env                                # API keys (not committed)
 ├── .env.example                        # API key template
@@ -112,6 +117,8 @@ rag.py :: get_rag_answer()
 | **Cohere** (`rerank-v3.5`) | Cross-encoder reranking of retrieved chunks |
 | **Groq** (`llama-3.1-8b-instant`) | Fast LLM for answer generation & query reformulation |
 | **PyPDFLoader** | PDF ingestion |
+| **Ragas** | Automated evaluation framework |
+| **Pandas / HuggingFace Datasets** | Dataset loading & result export |
 
 ---
 
@@ -276,24 +283,68 @@ After Pinecone returns the top 3 hybrid matches, **Cohere `rerank-v3.5`** re-sco
 
 ---
 
+## 📊 Evaluation with RAGAS
+
+The `evaluation/` folder contains a full automated evaluation pipeline that benchmarks the RAG system against a **golden dataset** of curated Q&A pairs.
+
+### How It Works
+
+```
+evaluation/dataset.csv
+  (question + ground_truth pairs)
+        │
+        ▼
+evaluate.py runs the full RAG pipeline for each question:
+  ├── Hybrid search (dense + sparse vectors)
+  ├── Cohere reranking
+  └── Groq generates answer
+
+        │
+        ▼
+RAGAS AI Judge scores every answer:
+  ├── Faithfulness         — Is the answer grounded in retrieved chunks? (no hallucination)
+  ├── Answer Relevancy     — Does the answer actually address the question?
+  ├── Context Precision    — Are the best chunks ranked first?
+  └── Context Recall       — Were all necessary facts retrieved?
+
+        │
+        ▼
+evaluation/evaluation_results.csv   ← scores saved here
+```
+
+### Running the Evaluation
+
+```bash
+cd evaluation
+python evaluate.py
+```
+
+> ⏳ A 10-second delay is added between questions to respect free API tier rate limits.
+
+### Evaluation Setup
+
+- **Judge LLM:** `llama-3.1-8b-instant` via Groq (`temperature=0.0` for deterministic scoring)
+- **Judge Embeddings:** `models/embedding-001` via Gemini
+- **Dataset format:** `dataset.csv` with columns `question`, `ground_truth`, and `context`
+- **Results saved to:** `evaluation_results.csv` with per-question scores
+
+### Adding More Questions to the Dataset
+
+Add rows to `evaluation/dataset.csv` in this format:
+
+```csv
+question,ground_truth,context
+"What is a Binary Search Tree?","A BST is a node-based binary tree where left child < parent < right child...","A Binary Search Tree is a data structure where each node has at most two children..."
+"What is deadlock?","Deadlock is a state where processes wait indefinitely for resources held by each other...","Deadlock occurs when a set of processes are blocked because each process is holding a resource..."
+```
+
+---
+
 ## ⚙️ Work in Progress
 
 These are planned enhancements that are not yet implemented:
 
-### 1. 🗂️ Golden Dataset & Offline Evaluation
-Manually curate 50–200 question-answer pairs based strictly on the DSA and OS notes, where each answer is human-verified. This **golden dataset** will serve as a ground truth benchmark to measure how well the RAG pipeline performs over time.
-
-**Blocked by:** Gemini API rate limits during bulk answer generation. Will be built incrementally.
-
-### 2. 📊 Automated Evaluation with Ragas
-Integrate [Ragas](https://github.com/explodinggradients/ragas) to run offline evaluations against the golden dataset. Key metrics to track:
-
-- **Faithfulness** — Is the generated answer grounded in the retrieved chunks?
-- **Answer Relevancy** — Does the answer actually address the question asked?
-- **Context Precision** — Are the retrieved chunks relevant to the question?
-- **Context Recall** — Are all necessary facts present in the retrieved context?
-
-### 3. ⚙️ CI/CD Pipeline with GitHub Actions
+### 1. ⚙️ CI/CD Pipeline with GitHub Actions
 Set up a GitHub Actions workflow so that every push to the repository automatically runs the Ragas evaluation script. If accuracy drops below a defined threshold, the build fails — preventing regressions from sneaking in through prompt changes or code updates.
 
 ```yaml
@@ -303,11 +354,11 @@ jobs:
   evaluate:
     runs-on: ubuntu-latest
     steps:
-      - run: python eval/run_ragas.py
-      - run: python eval/check_threshold.py  # Fails build if score drops
+      - run: python evaluation/evaluate.py
+      - run: python evaluation/check_threshold.py  # Fails build if score drops
 ```
 
-### 4. 🌐 Web UI (Streamlit / Gradio)
+### 2. 🌐 Web UI (Streamlit / Gradio)
 Replace the current terminal-based chat loop with a proper web interface so the system is accessible without running Python scripts manually. The UI will include a chat window, query history, and source citations (page number + file) displayed alongside each answer.
 
 **Candidates:**

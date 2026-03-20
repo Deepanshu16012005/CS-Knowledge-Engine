@@ -43,4 +43,4 @@ def rerank_pinecone_matches(query: str, pinecone_matches: list, top_n: int = 3) 
         final_context_pieces.append(formatted_chunk)
 
     # Combine the top 3 chunks into one big string
-    return "\n\n".join(final_context_pieces)
+    return "\n\n".join(final_context_pieces) , final_context_pieces

@@ -75,7 +75,7 @@ def get_rag_answer(query_text: str) -> str:
 
     # Ranking top 3 queries
     try:
-        context_text = rerank_pinecone_matches(
+        context_text, context_pieces = rerank_pinecone_matches(
             query=query_text, 
             pinecone_matches=query_results['matches'], 
             top_n=3
